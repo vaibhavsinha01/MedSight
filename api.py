@@ -21,8 +21,11 @@ import uuid
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+
+from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from agents.agents import AVAILABLE_IMAGE_MODELS, AVAILABLE_TABULAR_MODELS
@@ -45,6 +48,14 @@ app = FastAPI(
                  "vision/tabular models with Grad-CAM XAI + LLM-as-judge evaluation.",
     version="1.0.0",
 )
+
+
+app.mount("/static", StaticFiles(directory="frontend", html=True), name="static")
+
+
+@app.get("/", response_class=RedirectResponse)
+async def root() -> RedirectResponse:
+    return RedirectResponse(url="/static/login.html")
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_credentials=True,
     allow_methods=["*"], allow_headers=["*"],
@@ -237,12 +248,3 @@ async def chat(req: ChatRequest) -> ChatResponse:
         a2a_trace=state.get("a2a_trace", []),
         latency_ms=latency_ms,
     )
-
-
-@app.get("/")
-async def root() -> dict[str, str]:
-    return {
-        "message": "Medical Agentic AI System is running.",
-        "docs": "/docs",
-        "health": "/health",
-    }
