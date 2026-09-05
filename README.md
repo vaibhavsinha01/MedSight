@@ -2,8 +2,6 @@
 
 A multi-agent medical AI system combining **trained ML/DL models, Agentic RAG, explainable AI, and LangGraph** to analyze medical data, retrieve medical literature, and provide evidence-backed responses.
 
-> **Research and educational use only. This system is not intended for medical diagnosis or treatment.**
-
 ## Features
 
 * Medical prediction using XGBoost and CNN/EfficientNet models
