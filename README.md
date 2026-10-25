@@ -1,166 +1,48 @@
-# Medical Research & Diagnosis System
+# Medical Model Studio
 
-A multi-agent medical AI system combining **trained ML/DL models, Agentic RAG, explainable AI, and LangGraph** to analyze medical data, retrieve medical literature, and provide evidence-backed responses.
+A single Streamlit app for three local models—chest X-ray, heart disease, and lifestyle risk—with explainability and an opt-in PubMed/Gemini research agent.
 
-## Features
+> Research and education only. Model outputs are not diagnoses or treatment advice. The lifestyle-risk dataset is synthetic, so test performance does not establish clinical validity.
 
-* Medical prediction using XGBoost and CNN/EfficientNet models
-* Medical research retrieval using PubMed/PMC Agentic RAG
-* Explainability using Grad-CAM and feature importance
-* Multi-agent orchestration using LangGraph
-* Agent-to-agent communication with traceable messaging
-* LLM-as-a-Judge and deterministic evaluation
-* FastAPI REST API for prediction, research, and chat
+## Setup and run
 
-## Architecture
+Use Python 3.11 (TensorFlow 2.16):
 
-```text
-                         User
-                           |
-                           v
-                    Supervisor Agent
-                       (LangGraph)
-                           |
-             +-------------+-------------+
-             |             |             |
-             v             v             v
-        Vision Agent  Research Agent  Direct Answer
-             |             |
-        ML/DL + XAI    PubMed + RAG
-             |             |
-             +-------------+-------------+
-                           |
-                           v
-                    Evaluation Agent
-                           |
-                           v
-                     Final Response
-```
-
-## Project Structure
-
-```text
-project/
-├── agents/
-│   ├── graph.py
-│   └── agents.py
-├── rag/
-│   └── rag.py
-├── models/
-│   └── models.py
-├── weights/
-├── evaluation.py
-├── api.py
-├── main.py
-├── requirements.txt
-└── .env.example
-```
-
-## Setup
-
-### 1. Clone the repository
-
-```bash
-git clone <repository-url>
-cd project
-```
-
-### 2. Create environment and install dependencies
-
-```bash
-python -m venv venv
-source venv/bin/activate
+```powershell
+py -3.11 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
 pip install -r requirements.txt
+streamlit run app.py
 ```
 
-For Windows:
+Open `http://localhost:8501`. The Dockerfile runs the same Streamlit app.
 
-```bash
-venv\Scripts\activate
-```
+## Model files
 
-### 3. Configure API keys
+Place these files in `weights/`:
 
-```bash
-cp .env.example .env
-```
+| Model | Files |
+|---|---|
+| Chest X-ray | `chest_xray_model.h5` |
+| Heart disease | `xgboost_heart_disease.joblib` |
+| Risk | `xgboost_risk.joblib` and `xgboost_risk_scaler.joblib` |
 
-Add the required keys to `.env`:
+The risk model and scaler are a required pair. See `weights/README.md`.
 
-```env
-GEMINI_API_KEY=your_api_key
-NCBI_API_KEY=your_api_key
-```
+## Retrain risk model
 
-### 4. Add trained models
+Run the final section of `Medical_research_agent.ipynb`. It downloads the latest [Kaggle Lifestyle and Health Risk Prediction dataset](https://www.kaggle.com/datasets/miadul/lifestyle-and-health-risk-prediction), evaluates a held-out split, then saves the model and scaler in `weights/`. Kaggle access is required to rerun the cell.
 
-Place the trained model files inside `weights/`:
+The saved model was retrained on 5,000 rows and reached **98.5% held-out accuracy** with a fixed split. Treat this only as a synthetic-data benchmark.
 
-```text
-xgboost_heart_disease.joblib
-xgboost_risk.joblib
-chest_xray_model.h5
-brain_mri_model.h5
-skin_lesion_model.h5
-IDRiD_EfficientNetB0_DR_Classifier.keras
-Bone_Fracture_EfficientNetB0.keras
-```
+## Explainability
 
-Missing models will not prevent the application from starting.
+- Chest X-ray: Grad-CAM, saliency, and occlusion sensitivity maps.
+- Tabular models: local SHAP and LIME feature attributions.
 
-## Run
+These methods describe model behavior; they do not prove causation or clinical findings. LIME uses a generated neighborhood because training data is not bundled.
 
-```bash
-python main.py
-```
+## Research agent and privacy
 
-Or:
-
-```bash
-uvicorn main:app --reload --port 8000
-```
-
-Open the API documentation at:
-
-```text
-http://localhost:8000/docs
-```
-
-## API
-
-| Endpoint         | Description                   |
-| ---------------- | ----------------------------- |
-| `POST /chat`     | Complete multi-agent workflow |
-| `POST /predict`  | Direct prediction and XAI     |
-| `POST /research` | PubMed research               |
-| `POST /upload`   | Upload medical image          |
-| `GET /health`    | System and model status       |
-| `GET /models`    | Available models              |
-
-## Evaluation
-
-Run the full benchmark:
-
-```bash
-python evaluation.py
-```
-
-Run a quick test:
-
-```bash
-python evaluation.py --n 3
-```
-
-Results are saved to:
-
-```text
-logs/evaluation_report.json
-```
-
-## Tech Stack
-
-**Python, LangGraph, FastAPI, TensorFlow/Keras, XGBoost, scikit-learn, PubMed/NCBI, Gemini, Grad-CAM, Agentic RAG**
-
-## Disclaimer
-
-This project is a research prototype. Model predictions, generated explanations, and retrieved research should not be used as a substitute for assessment by a qualified medical professional.
+The Research agent retrieves up to four relevance-ranked PubMed abstracts and uses Gemini `gemini-3.5-flash-lite` to write a concise, source-grounded summary with numbered citations. It runs only after the user checks the consent box and clicks **Search and summarize**. Set `GEMINI_API_KEY` in the git-ignored `.env` file; `NCBI_API_KEY` is optional. Without a Gemini key, the app returns the retrieved citations without a generated summary. Do not submit identifying patient information.

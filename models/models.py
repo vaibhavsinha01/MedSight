@@ -8,20 +8,14 @@ This module does NOT reconstruct architectures and does NOT train stub/fallback 
 It loads exactly what you saved:
 
   Tabular (XGBoost, joblib.dump):
-    - vitals_risk     <- xgboost_heart_disease.joblib   (3-class: Low/Medium/High)
-    - lifestyle_risk  <- xgboost_risk.joblib             (binary: Low/High)
+    - heart_disease     <- xgboost_heart_disease.joblib   (3-class: Low/Medium/High)
+    - risk  <- xgboost_risk.joblib             (binary: Low/High)
 
   Vision (Keras model.save / .keras or .h5):
     - chest_xray            <- chest_xray_model.h5                        (NORMAL/PNEUMONIA/COVID)
-    - brain_tumor            <- brain_mri_model.h5                         (glioma/meningioma/notumor/pituitary)
-    - skin_lesion            <- skin_lesion_model.h5                       (akiec/bcc/bkl/df/mel/nv/vasc)
-    - diabetic_retinopathy   <- IDRiD_EfficientNetB0_DR_Classifier.keras  (No DR..Proliferative DR)
-    - bone_fracture          <- Bone_Fracture_EfficientNetB0.keras         (fractured/not fractured)
 
 Drop the corresponding files into WEIGHTS_DIR (see weights/README.md). If a file is
-missing, the loader raises a clear ModelNotAvailableError at the point of use — the rest
-of the app (RAG, agents, API scaffolding) still runs and reports this cleanly instead of
-ever fabricating a prediction from an untrained model.
+missing, the loader raises ModelNotAvailableError when the model is used.
 
 Grad-CAM is implemented generically against whatever real model gets loaded: it walks
 model.layers (recursing into nested submodels such as an EfficientNet backbone) to find
@@ -73,6 +67,43 @@ class ModelNotAvailableError(RuntimeError):
     """Raised when a requested model's weight file is not present in WEIGHTS_DIR, or fails to load."""
 
 
+def _tabular_explanations(model, row: np.ndarray, features: list[str], probabilities: np.ndarray):
+    """Return local SHAP and LIME attributions; either method can fail independently."""
+    warnings, values = [], {}
+    try:
+        import shap
+        explanation = shap.TreeExplainer(model).shap_values(row.reshape(1, -1))
+        target = int(np.argmax(probabilities))
+        if isinstance(explanation, list):
+            explanation = explanation[target]
+        explanation = np.asarray(explanation)
+        if explanation.ndim == 3:
+            explanation = explanation[0, :, target]
+        elif explanation.ndim == 2:
+            explanation = explanation[0]
+        explanation = explanation.reshape(-1)
+        values["SHAP"] = explanation
+    except Exception as exc:
+        warnings.append(f"SHAP unavailable: {exc}")
+    try:
+        from lime.lime_tabular import LimeTabularExplainer
+        scale = np.maximum(np.abs(row), 1.0) * 0.15
+        background = row + np.random.default_rng(7).normal(size=(128, len(row))) * scale
+        explainer = LimeTabularExplainer(background, feature_names=features, class_names=[str(i) for i in range(len(probabilities))],
+                                         mode="classification", discretize_continuous=False, random_state=7)
+        local = explainer.explain_instance(row, model.predict_proba, num_features=min(6, len(features)), num_samples=256)
+        values["LIME"] = np.zeros(len(features))
+        for index, weight in local.as_map().get(int(np.argmax(probabilities)), []):
+            values["LIME"][index] = weight
+    except Exception as exc:
+        warnings.append(f"LIME unavailable: {exc}")
+    ranked = []
+    for method, attribution in values.items():
+        ranked.extend({"feature": name, "importance": round(float(score), 5), "method": method}
+                      for name, score in zip(features, attribution))
+    return sorted(ranked, key=lambda item: abs(item["importance"]), reverse=True)[:10], warnings
+
+
 # --------------------------------------------------------------------------
 # Result container
 # --------------------------------------------------------------------------
@@ -96,7 +127,7 @@ class PredictionResult:
 class VitalsRiskModel:
     """Loads xgboost_heart_disease.joblib — trained on Health_Risk_Dataset.csv (notebook cells 7-10)."""
 
-    NAME = "vitals_risk"
+    NAME = "heart_disease"
     WEIGHT_FILE = "xgboost_heart_disease.joblib"
     FEATURES = [
         "Respiratory_Rate", "Oxygen_Saturation", "O2_Scale",
@@ -128,13 +159,8 @@ class VitalsRiskModel:
         probs = {c: float(p) for c, p in zip(classes, proba)}
 
         warnings: list[str] = []
-        try:
-            importances = self.model.feature_importances_
-            contrib = sorted(zip(self.FEATURES, importances.tolist()), key=lambda t: t[1], reverse=True)
-            top_features = [{"feature": f, "importance": round(v, 4)} for f, v in contrib[:5]]
-        except Exception as e:
-            top_features = []
-            warnings.append(f"Feature importance unavailable: {e}")
+        top_features, xai_warnings = _tabular_explanations(self.model, x[0], self.FEATURES, proba)
+        warnings.extend(xai_warnings)
 
         return PredictionResult(
             model_name=self.NAME,
@@ -143,15 +169,15 @@ class VitalsRiskModel:
             confidence=float(proba[idx]),
             class_probabilities=probs,
             modality="tabular",
-            explanation={"top_features": top_features, "method": "xgboost_feature_importance"},
+            explanation={"top_features": top_features, "methods": ["SHAP", "LIME"]},
             warnings=warnings,
         )
 
 
 class LifestyleRiskModel:
-    """Loads xgboost_risk.joblib — trained on the lifestyle & health risk dataset (notebook cells 16-19)."""
+    """Loads the paired lifestyle risk model and StandardScaler artifacts."""
 
-    NAME = "lifestyle_risk"
+    NAME = "risk"
     WEIGHT_FILE = "xgboost_risk.joblib"
     FEATURES = ["age", "weight", "height", "exercise", "sleep", "sugar_intake",
                 "smoking", "alcohol", "married", "profession", "bmi"]
@@ -162,11 +188,6 @@ class LifestyleRiskModel:
     PROFESSION_MAP = {"office_worker": 0, "teacher": 1, "artist": 2, "farmer": 3,
                        "driver": 4, "engineer": 5, "student": 6, "other": 7}
 
-    # NOTE: the notebook fits this model on features scaled with StandardScaler, but only
-    # the model itself was joblib.dump'd (cell 19), not the fitted scaler. XGBoost tree
-    # splits are scale-invariant, so raw encoded features are used by default. If you also
-    # have the fitted scaler saved separately, drop it in as xgboost_risk_scaler.joblib
-    # and it will be picked up automatically.
     SCALER_FILE = "xgboost_risk_scaler.joblib"
 
     def __init__(self):
@@ -186,10 +207,10 @@ class LifestyleRiskModel:
 
     def _load_scaler(self):
         path = os.path.join(WEIGHTS_DIR, self.SCALER_FILE)
-        if os.path.exists(path):
-            logger.info(f"[{self.NAME}] loaded optional scaler {path}")
-            return _joblib_lib().load(path)
-        return None
+        if not os.path.exists(path):
+            raise ModelNotAvailableError(f"Required scaler '{self.SCALER_FILE}' not found in {WEIGHTS_DIR}.")
+        logger.info(f"[{self.NAME}] loaded scaler {path}")
+        return _joblib_lib().load(path)
 
     def _encode(self, raw: dict[str, Any]) -> np.ndarray:
         row = [
@@ -207,8 +228,7 @@ class LifestyleRiskModel:
 
     def predict(self, raw: dict[str, Any]) -> PredictionResult:
         x = self._encode(raw)
-        if self.scaler is not None:
-            x = self.scaler.transform(x)
+        x = self.scaler.transform(x)
         proba = self.model.predict_proba(x)[0]
         idx = int(np.argmax(proba))
         n_classes = len(proba)
@@ -217,19 +237,8 @@ class LifestyleRiskModel:
         probs = {c: float(p) for c, p in zip(classes, proba)}
 
         warnings: list[str] = []
-        if self.scaler is None:
-            warnings.append(
-                "No fitted StandardScaler found (xgboost_risk_scaler.joblib) — using raw "
-                "feature values. Safe for XGBoost (tree splits are scale-invariant) but "
-                "flagged for transparency."
-            )
-        try:
-            importances = self.model.feature_importances_
-            contrib = sorted(zip(self.FEATURES, importances.tolist()), key=lambda t: t[1], reverse=True)
-            top_features = [{"feature": f, "importance": round(v, 4)} for f, v in contrib[:5]]
-        except Exception as e:
-            top_features = []
-            warnings.append(f"Feature importance unavailable: {e}")
+        top_features, xai_warnings = _tabular_explanations(self.model, x[0], self.FEATURES, proba)
+        warnings.extend(xai_warnings)
 
         return PredictionResult(
             model_name=self.NAME,
@@ -238,7 +247,7 @@ class LifestyleRiskModel:
             confidence=float(proba[idx]),
             class_probabilities=probs,
             modality="tabular",
-            explanation={"top_features": top_features, "method": "xgboost_feature_importance"},
+            explanation={"top_features": top_features, "methods": ["SHAP", "LIME"]},
             warnings=warnings,
         )
 
@@ -469,6 +478,44 @@ class _KerasVisionModel:
         }
 
     # -- predict -----------------------------------------------------------
+    def _saliency(self, x: np.ndarray, class_idx: int) -> np.ndarray | None:
+        try:
+            tf = _tf_lib()
+            image = tf.convert_to_tensor(x)
+            with tf.GradientTape() as tape:
+                tape.watch(image)
+                scores = self.model(image, training=False)
+                target = scores[:, 0] if scores.shape[-1] == 1 else scores[:, class_idx]
+            grad = tape.gradient(target, image)[0]
+            heat = tf.reduce_max(tf.abs(grad), axis=-1).numpy()
+            return heat / (heat.max() + 1e-8)
+        except Exception as exc:
+            logger.warning("Saliency failed: %s", exc)
+            return None
+
+    def _occlusion(self, x: np.ndarray, class_idx: int) -> np.ndarray | None:
+        try:
+            tf = _tf_lib()
+            base = float(self.model.predict(x, verbose=0)[0][class_idx])
+            size, stride = max(16, self.IMG_SIZE // 8), max(8, self.IMG_SIZE // 8)
+            samples, coords = [], []
+            for y in range(0, self.IMG_SIZE, stride):
+                for x0 in range(0, self.IMG_SIZE, stride):
+                    y1, x1 = min(y + size, self.IMG_SIZE), min(x0 + size, self.IMG_SIZE)
+                    masked = x.copy()
+                    masked[:, y:y1, x0:x1, :] = float(np.mean(x))
+                    samples.append(masked[0]); coords.append((y, y1, x0, x1))
+            probs = self.model.predict(np.asarray(samples), batch_size=32, verbose=0)
+            scores = np.asarray([base - float(p[class_idx]) for p in probs])
+            heat = np.zeros((self.IMG_SIZE, self.IMG_SIZE), dtype=np.float32)
+            for (y, y1, x0, x1), score in zip(coords, scores):
+                heat[y:y1, x0:x1] += score
+            heat = np.maximum(heat, 0)
+            return heat / (heat.max() + 1e-8)
+        except Exception as exc:
+            logger.warning("Occlusion sensitivity failed: %s", exc)
+            return None
+
     def predict(self, image_bytes: bytes, with_gradcam: bool = True) -> PredictionResult:
         x = self._preprocess(image_bytes)
         raw = self.model.predict(x, verbose=0)[0]
@@ -485,7 +532,7 @@ class _KerasVisionModel:
             self.CLASSES + [f"class_{i}" for i in range(len(self.CLASSES), n)]
         probs = {c: float(p) for c, p in zip(classes, probs_arr)}
 
-        explanation: dict[str, Any] = {"method": "Grad-CAM"}
+        explanation: dict[str, Any] = {"methods": []}
         warnings: list[str] = []
         if with_gradcam:
             heatmap = self._gradcam(x, idx)
@@ -493,11 +540,15 @@ class _KerasVisionModel:
                 explanation["gradcam_png_base64"] = self._overlay_heatmap(image_bytes, heatmap)
                 explanation["important_region"] = self._important_region(heatmap)
                 explanation["conv_layer_used"] = self._conv_layer.name if self._conv_layer is not None else None
+                explanation["methods"].append("Grad-CAM")
             else:
-                warnings.append(
-                    "Grad-CAM unavailable for this model instance (no conv layer found or "
-                    "gradient computation failed)."
-                )
+                warnings.append("Grad-CAM unavailable for this model instance.")
+            for method, heat in (("Saliency", self._saliency(x, idx)), ("Occlusion sensitivity", self._occlusion(x, idx))):
+                if heat is not None:
+                    explanation[method.lower().replace(" ", "_") + "_png_base64"] = self._overlay_heatmap(image_bytes, heat)
+                    explanation["methods"].append(method)
+                else:
+                    warnings.append(f"{method} unavailable for this model instance.")
 
         return PredictionResult(
             model_name=self.NAME,
@@ -520,65 +571,6 @@ class ChestXrayModel(_KerasVisionModel):
     TASK = "Chest X-ray triage (Normal / Pneumonia / COVID-19)"
 
 
-class BrainTumorModel(_KerasVisionModel):
-    NAME = "brain_tumor"
-    WEIGHT_FILE = "brain_mri_model.h5"
-    IMG_SIZE = 224
-    CHANNELS = 3
-    CLASSES = ["glioma", "meningioma", "notumor", "pituitary"]
-    TASK = "Brain MRI tumor classification"
-
-
-class SkinLesionModel(_KerasVisionModel):
-    NAME = "skin_lesion"
-    WEIGHT_FILE = "skin_lesion_model.h5"
-    IMG_SIZE = 224
-    CHANNELS = 3
-    CLASSES = ["akiec", "bcc", "bkl", "df", "mel", "nv", "vasc"]
-    TASK = "Dermoscopic skin lesion classification (HAM10000 taxonomy)"
-
-
-class DiabeticRetinopathyModel(_KerasVisionModel):
-    NAME = "diabetic_retinopathy"
-    WEIGHT_FILE = "IDRiD_EfficientNetB0_DR_Classifier.keras"
-    IMG_SIZE = 256
-    CHANNELS = 3
-    CLASSES = ["No DR", "Mild", "Moderate", "Severe", "Proliferative DR"]
-    TASK = "Diabetic retinopathy grading from retinal fundus image"
-    RESCALE = False  # notebook's tf.data pipeline feeds raw 0-255 floats directly into the model
-
-    # Cell 38 trains with a custom label-smoothing loss. Not needed for inference
-    # (compile=False), but some Keras versions still want the symbol registered when
-    # deserializing the model config, so we provide it defensively.
-    @staticmethod
-    def _sparse_label_smoothing_loss(y_true, y_pred):
-        import tensorflow as tf
-        num_classes = 5
-        label_smoothing = 0.05
-        y_true = tf.cast(y_true, tf.int32)
-        y_true = tf.one_hot(y_true, depth=num_classes)
-        y_true = y_true * (1.0 - label_smoothing) + label_smoothing / num_classes
-        y_pred = tf.clip_by_value(y_pred, tf.keras.backend.epsilon(), 1.0 - tf.keras.backend.epsilon())
-        loss = -tf.reduce_sum(y_true * tf.math.log(y_pred), axis=-1)
-        return tf.reduce_mean(loss)
-
-    @property
-    def CUSTOM_OBJECTS(self):
-        return {"sparse_label_smoothing_loss": self._sparse_label_smoothing_loss}
-
-
-class BoneFractureModel(_KerasVisionModel):
-    NAME = "bone_fracture"
-    WEIGHT_FILE = "Bone_Fracture_EfficientNetB0.keras"
-    IMG_SIZE = 224
-    CHANNELS = 3
-    CLASSES = ["not fractured", "fractured"]
-    TASK = "Bone X-ray fracture detection"
-    RESCALE = False  # notebook feeds resized 0-255 floats directly (EfficientNet rescaling is internal)
-
-
-# --------------------------------------------------------------------------
-# Registry: lazy singleton instances so weights load once per process
 # --------------------------------------------------------------------------
 
 class ModelRegistry:
@@ -590,17 +582,13 @@ class ModelRegistry:
     _load_errors: dict[str, str] = {}
 
     _CATALOG = {
-        "vitals_risk": VitalsRiskModel,
-        "lifestyle_risk": LifestyleRiskModel,
+        "heart_disease": VitalsRiskModel,
+        "risk": LifestyleRiskModel,
         "chest_xray": ChestXrayModel,
-        "brain_tumor": BrainTumorModel,
-        "skin_lesion": SkinLesionModel,
-        "diabetic_retinopathy": DiabeticRetinopathyModel,
-        "bone_fracture": BoneFractureModel,
     }
 
-    IMAGE_MODELS = ["chest_xray", "brain_tumor", "skin_lesion", "diabetic_retinopathy", "bone_fracture"]
-    TABULAR_MODELS = ["vitals_risk", "lifestyle_risk"]
+    IMAGE_MODELS = ["chest_xray"]
+    TABULAR_MODELS = ["heart_disease", "risk"]
 
     @classmethod
     def get(cls, name: str):
@@ -660,3 +648,4 @@ def predict_tabular(model_name: str, features: dict[str, Any]) -> PredictionResu
         raise ValueError(f"'{model_name}' is not a tabular model. Choose from {ModelRegistry.TABULAR_MODELS}")
     model = ModelRegistry.get(model_name)
     return model.predict(features)
+

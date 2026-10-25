@@ -1,33 +1,19 @@
-# --- Web framework ---
-fastapi>=0.115.0
-# Starlette 1.x is not compatible with the FastAPI releases supported above.
-starlette>=0.40.0,<1.0.0
-uvicorn[standard]>=0.30.0
-python-multipart>=0.0.9
-pydantic>=2.7.0
-
-# --- Agent orchestration ---
-langgraph>=0.2.20
-langchain-core>=0.3.0
-
-# --- LLM client (Anthropic Claude) ---
-anthropic>=0.34.0
-
-# --- RAG / retrieval ---
+# UI
+streamlit>=1.36.0
 httpx>=0.27.0
 
-# --- ML/DL models (matches notebook: XGBoost, TensorFlow/Keras, sklearn) ---
+# Models and XAI
 tensorflow>=2.16.0,<2.17.0
 xgboost>=2.0.0
 scikit-learn>=1.4.0
 joblib>=1.3.0
 numpy>=1.26.0
 pandas>=2.2.0
-
-# --- Image processing / Grad-CAM overlay ---
+shap>=0.46.0
+lime>=0.2.0.1
 Pillow>=10.3.0
 matplotlib>=3.8.0
-opencv-python-headless>=4.9.0
 
-# --- utils ---
+# Notebook training and configuration
+kagglehub>=0.3.12
 python-dotenv>=1.0.0
