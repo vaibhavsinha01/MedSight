@@ -50,12 +50,16 @@ app = FastAPI(
 )
 
 
-app.mount("/static", StaticFiles(directory="frontend", html=True), name="static")
+FRONTEND_DIR = Path(__file__).parent / "frontend"
+if FRONTEND_DIR.is_dir():
+    app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="static")
 
 
 @app.get("/", response_class=RedirectResponse)
 async def root() -> RedirectResponse:
-    return RedirectResponse(url="/static/login.html")
+    if FRONTEND_DIR.is_dir() and (FRONTEND_DIR / "login.html").is_file():
+        return RedirectResponse(url="/static/login.html")
+    return RedirectResponse(url="/docs")
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_credentials=True,
     allow_methods=["*"], allow_headers=["*"],

@@ -1,5 +1,7 @@
 # --- Web framework ---
 fastapi>=0.115.0
+# Starlette 1.x is not compatible with the FastAPI releases supported above.
+starlette>=0.40.0,<1.0.0
 uvicorn[standard]>=0.30.0
 python-multipart>=0.0.9
 pydantic>=2.7.0
